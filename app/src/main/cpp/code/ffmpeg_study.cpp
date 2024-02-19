@@ -25,8 +25,9 @@ extern "C" {
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR,APP_TAG, __VA_ARGS__)
 
 
-void swscaleFrame(int videoWidth,int videoHeight);
-void drawFrame();
+static ANativeWindow *pNativeWindow;
+
+void swscaleFrame(int videoWidth,int videoHeight,int renderWidth,int renderHeight,enum AVPixelFormat srcFormat,AVFrame *frame);
 
 static void log_callback(void *ptr,int level,const char *fmt,va_list vl){
     char buffer[1024];
@@ -67,8 +68,7 @@ Java_com_example_myapplication_Player_getVersion(JNIEnv *env, jobject thiz) {
 
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_example_myapplication_Player_playWithSurface(JNIEnv *env, jobject thiz, jstring path,
-                                                      jobject surface) {
+Java_com_example_myapplication_Player_playWithSurface(JNIEnv *env, jobject thiz, jstring path) {
     const char* input = env->GetStringUTFChars(path, nullptr);
     LOGD("input file path %s",input);
 
@@ -80,6 +80,10 @@ Java_com_example_myapplication_Player_playWithSurface(JNIEnv *env, jobject thiz,
 
     AVPacket *packet;
     AVFrame *frame;
+    AVFrame *rgbFrame;
+    uint8_t *frameBuffer;
+    SwsContext *pSwsCtx;
+    ANativeWindow_Buffer rgbWindowBuff;
 
     int ret = 0;
     if ((ret = avformat_open_input(&pFormatCtx,input,NULL,NULL)) < 0){
@@ -118,23 +122,44 @@ Java_com_example_myapplication_Player_playWithSurface(JNIEnv *env, jobject thiz,
         return ret;
     }
 
-
     int videoWidth = pCodecCtx->width;
-    int videoHeight = pCodecCtx->
+    int videoHeight = pCodecCtx->height;
 
-    ANativeWindow *pNativeWindow = ANativeWindow_fromSurface(env,surface);
-    ANativeWindow_setBuffersGeometry(pNativeWindow,);
+    int renderWidth = ANativeWindow_getWidth(pNativeWindow);
+    int renderHeight = ANativeWindow_getHeight(pNativeWindow);
+
+    ANativeWindow_setBuffersGeometry(pNativeWindow,videoWidth,videoHeight,WINDOW_FORMAT_RGBA_8888);
+    rgbFrame = av_frame_alloc();
+
+    int bufferSize = av_image_get_buffer_size(AV_PIX_FMT_RGBA ,videoWidth,videoHeight,1);
+    frameBuffer = (uint8_t *)av_malloc(bufferSize * sizeof(uint8_t));
+
+    av_image_fill_arrays(rgbFrame->data,rgbFrame->linesize,frameBuffer,AV_PIX_FMT_RGBA,videoWidth,videoHeight,1);
+
+    pSwsCtx = sws_getContext(videoWidth,videoHeight,pCodecCtx->pix_fmt,renderWidth,renderHeight,AV_PIX_FMT_RGBA,SWS_FAST_BILINEAR,NULL,NULL,NULL);
+
+    LOGD("video width %d,%d,renderWidth %d,%d",videoWidth,videoHeight,renderWidth,renderHeight);
 
     packet = av_packet_alloc();
     frame = av_frame_alloc();
-//https://mp.weixin.qq.com/s?__biz=MzIwNTIwMzAzNg==&mid=2654162564&idx=1&sn=6785c7f9b6bdccbd400f792e9389b15c&chksm=8cf39db7bb8414a14a4acdea47e866f4b19ebdf80ed5aa7663a678c9571d505ecda294b65a05&cur_album_id=1487921640154906631&scene=189#wechat_redirect
+//
     while (av_read_frame(pFormatCtx,packet) >=0 ){
         if (packet->stream_index == video_stream_index){
             if (avcodec_send_packet(pCodecCtx,packet) != 0){
                 return -1;
             }
             while (avcodec_receive_frame(pCodecCtx,frame) == 0){
-                swscaleFrame();
+                sws_scale(pSwsCtx,frame->data,frame->linesize,0,videoHeight,rgbFrame->data,rgbFrame->linesize);
+                //swscaleFrame(videoWidth,videoHeight,renderWidth,renderHeight,pCodecCtx->pix_fmt,frame);
+                ANativeWindow_lock(pNativeWindow,&rgbWindowBuff, nullptr);
+                uint8_t *dstBuffer = static_cast<uint8_t *>(rgbWindowBuff.bits);
+                int srcLineSize = rgbFrame->linesize[0];
+                int dstLineSize = rgbWindowBuff.stride * 4;
+
+                for (int i = 0; i < videoHeight; ++i) {
+                    memcpy(dstBuffer + i * dstLineSize,frameBuffer + i * srcLineSize,srcLineSize);
+                }
+                ANativeWindow_unlockAndPost(pNativeWindow);
             }
         }
         av_packet_unref(packet);
@@ -164,21 +189,40 @@ Java_com_example_myapplication_Player_playWithSurface(JNIEnv *env, jobject thiz,
         pFormatCtx = nullptr;
     }
 
+    if (rgbFrame != nullptr){
+        av_frame_free(&rgbFrame);
+        rgbFrame = nullptr;
+    }
+
+    if (frameBuffer != nullptr){
+        free(frameBuffer);
+        frameBuffer = nullptr;
+    }
+
+    if (pSwsCtx != nullptr){
+        sws_freeContext(pSwsCtx);
+        pSwsCtx = nullptr;
+    }
+
+    if (pNativeWindow){
+        ANativeWindow_release(pNativeWindow);
+    }
+
+
     return ret;
 }
 
-void swscaleFrame(int width,int height,int renderWidth,int renderHeight,enum AVPixelFormat srcFormat,AVFrame *frame){
-    AVFrame *rgbFrame = av_frame_alloc();
-    int bufferSize = av_image_get_buffer_size(AV_PIX_FMT_RGBA ,width,height,1);
-    uint8_t *frameBuffer = (uint8_t *)av_malloc(bufferSize * sizeof(uint8_t));
-    av_image_fill_arrays(rgbFrame->data,rgbFrame->linesize,frameBuffer,AV_PIX_FMT_RGBA,width,height,1);
-    SwsContext *pSwsCtx = sws_getContext(width,height,srcFormat,renderWidth,renderHeight,AV_PIX_FMT_RGBA,SWS_FAST_BILINEAR,NULL,NULL,NULL);
+//void swscaleFrame(int videoWidth,int videoHeight,int renderWidth,int renderHeight,enum AVPixelFormat srcFormat,AVFrame *frame){
+//    AVFrame *rgbFrame = av_frame_alloc();
+//    int bufferSize = av_image_get_buffer_size(AV_PIX_FMT_RGBA ,videoWidth,videoHeight,1);
+//    uint8_t *frameBuffer = (uint8_t *)av_malloc(bufferSize * sizeof(uint8_t));
+//    av_image_fill_arrays(rgbFrame->data,rgbFrame->linesize,frameBuffer,AV_PIX_FMT_RGBA,videoWidth,videoHeight,1);
+//    SwsContext *pSwsCtx = sws_getContext(videoWidth,videoHeight,srcFormat,renderWidth,renderHeight,AV_PIX_FMT_RGBA,SWS_FAST_BILINEAR,NULL,NULL,NULL);
+//}
 
-    sws_scale(pSwsCtx,frame->data,frame->linesize,0,height,rgbFrame->data,rgbFrame->linesize);
-
-
-}
-
-void drawFrame(){
-    ANativeWindow_fromSurface()
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_example_myapplication_Player_surfaceCreated(JNIEnv *env, jobject thiz, jobject surface) {
+    pNativeWindow = ANativeWindow_fromSurface(env,surface);
+    LOGI("surface created");
 }

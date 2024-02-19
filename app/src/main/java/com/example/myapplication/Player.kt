@@ -1,5 +1,6 @@
 package com.example.myapplication
 
+import android.view.Surface
 import android.view.SurfaceView
 
 object Player {
@@ -15,7 +16,9 @@ object Player {
 
     external fun getVersion(): String
 
-    external fun playWithSurface(path: String, view: SurfaceView): Int
+    external fun playWithSurface(path: String): Int
+
+    external fun surfaceCreated(surface: Surface)
 
 
 
